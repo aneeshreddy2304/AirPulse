@@ -1,0 +1,20 @@
+[Unit]
+Description=AQI MLOps — FastAPI via Docker Compose
+After=network.target docker.service
+Requires=docker.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+User=__USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/bin/docker compose up
+ExecStop=/usr/bin/docker compose down
+Restart=on-failure
+RestartSec=10s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aqi-api
+
+[Install]
+WantedBy=multi-user.target

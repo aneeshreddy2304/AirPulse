@@ -1,0 +1,134 @@
+name: Daily Model Retrain
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: 'Days of training data to include'
+        required: false
+        default: '365'
+
+jobs:
+  ci-gate:
+    name: CI gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv + Python 3.12
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Lint
+        run: uv run ruff check app/ ml/ tests/
+
+      - name: Run tests
+        run: uv run pytest tests/test_inference.py tests/test_training_logic.py -v --tb=short
+
+  retrain:
+    name: Daily retrain + validate + deploy
+    needs: ci-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv + Python 3.12
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Run daily retrain
+        run: |
+          DAYS=${{ github.event.inputs.lookback_days || '365' }}
+          echo "Training on last ${DAYS} days"
+          uv run python ml/train.py --lookback-days "$DAYS"
+
+      - name: Validate new model
+        run: |
+          uv run python - <<'EOF2'
+          import numpy as np
+          from app.inference import FEATURES, load_artifacts
+
+          model, median = load_artifacts()
+          X = np.zeros((1, len(FEATURES)), dtype="float32")
+          proba = model.predict_proba(X)
+
+          assert proba.shape == (1, 5)
+          assert abs(proba.sum() - 1.0) < 1e-3
+          assert len(median) >= 10
+
+          print("Model smoke test passed")
+          EOF2
+
+      - name: Upload model artifact to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: airpulse-model-${{ github.run_id }}
+          path: |
+            ml/model-registry/model.ubj
+            ml/model-registry/median.json
+            ml/model-registry/features.json
+          retention-days: 30
+
+      - name: Upload model to S3
+        run: |
+          aws s3 cp ml/model-registry/model.ubj \
+            s3://airpulse-aneesh-2026/deploy/model/model.ubj
+
+          aws s3 cp ml/model-registry/median.json \
+            s3://airpulse-aneesh-2026/deploy/model/median.json
+
+          aws s3 cp ml/model-registry/features.json \
+            s3://airpulse-aneesh-2026/deploy/model/features.json
+
+      - name: Deploy model to EC2 through SSM
+        env:
+          INSTANCE_ID: i-0c3d8e7ebf9d3e865
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "set -e",
+              "mkdir -p /home/ubuntu/AirPulse/ml/model-registry",
+              "aws s3 cp s3://airpulse-aneesh-2026/deploy/model/model.ubj /home/ubuntu/AirPulse/ml/model-registry/model.ubj",
+              "aws s3 cp s3://airpulse-aneesh-2026/deploy/model/median.json /home/ubuntu/AirPulse/ml/model-registry/median.json",
+              "aws s3 cp s3://airpulse-aneesh-2026/deploy/model/features.json /home/ubuntu/AirPulse/ml/model-registry/features.json",
+              "chown -R ubuntu:ubuntu /home/ubuntu/AirPulse/ml/model-registry",
+              "curl -sf -X POST http://127.0.0.1:8000/reload-model",
+              "curl -sf http://127.0.0.1:8000/health"
+            ]' \
+            --query 'Command.CommandId' \
+            --output text)
+
+          echo "SSM command: $COMMAND_ID"
+
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID"
+
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query '[Status,StandardOutputContent,StandardErrorContent]' \
+            --output text

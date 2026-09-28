@@ -1,0 +1,40 @@
+# Secrets
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Data / outputs
+*.parquet
+*.csv
+*.json
+data/
+
+# uv
+.uv/
+
+# Notebooks / experiments
+experiement/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+ml/mlruns
+
+# Model registry artifacts — trained on EC2, never stored in git.
+# The host bind-mount keeps them safe across deploys.
+ml/model-registry/*.ubj
+ml/model-registry/*.json

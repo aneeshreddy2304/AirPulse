@@ -1,0 +1,1540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AQI Forecast Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    body { background: #0a0f1e; }
+  </style>
+</head>
+
+<body class="text-gray-100 min-h-screen font-sans antialiased" x-data="dashboard()" x-cloak>
+
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header class="border-b border-gray-800 px-6 py-4" style="background:#0d1224">
+    <div class="max-w-7xl mx-auto flex items-center justify-between">
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-white">
+          AQI Forecast Dashboard
+        </h1>
+        <p class="text-xs text-gray-500 mt-0.5">Next-hour air quality prediction · XGBoost · Real-time</p>
+      </div>
+      <span class="text-xs text-gray-600" x-text="lastUpdated ? 'Last refresh: ' + lastUpdated : ''"></span>
+      <span x-show="nextRefreshSec > 0"
+            class="text-[11px] text-gray-700 ml-4 tabular-nums" x-text="'Auto-refresh in ' + fmtCountdown(nextRefreshSec)"></span>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-6 py-8 space-y-6">
+
+    <!-- ── Tab bar ──────────────────────────────────────────────────────── -->
+    <div class="flex border-b border-gray-800">
+      <button @click="setView('forecast')"
+              :class="activeView === 'forecast' ? 'border-b-2 border-blue-500 text-white' : 'text-gray-500 hover:text-gray-300'"
+              class="px-6 py-2.5 text-sm font-semibold transition-colors -mb-px">
+        Forecast
+      </button>
+      <button @click="setView('drift')"
+              :class="activeView === 'drift' ? 'border-b-2 border-purple-500 text-white' : 'text-gray-500 hover:text-gray-300'"
+              class="px-6 py-2.5 text-sm font-semibold transition-colors -mb-px">
+        Data Drift
+      </button>
+      <button @click="setView('metrics')"
+              :class="activeView === 'metrics' ? 'border-b-2 border-green-500 text-white' : 'text-gray-500 hover:text-gray-300'"
+              class="px-6 py-2.5 text-sm font-semibold transition-colors -mb-px">
+        Metrics
+      </button>
+      <button @click="setView('model')"
+              :class="activeView === 'model' ? 'border-b-2 border-yellow-500 text-white' : 'text-gray-500 hover:text-gray-300'"
+              class="px-6 py-2.5 text-sm font-semibold transition-colors -mb-px">
+        Model
+      </button>
+    </div>
+
+    <!-- ── Forecast controls (only visible on Forecast tab) ───────────────── -->
+    <section x-show="activeView === 'forecast'" x-transition
+             class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+      <div class="flex flex-wrap gap-4 items-end">
+        <!-- City selector -->
+        <div class="flex-1 min-w-56">
+          <label class="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+            City
+          </label>
+          <select x-model="selectedCity"
+                  class="w-full rounded-xl px-4 py-2.5 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 border border-gray-700"
+                  style="background:#161d33">
+            <option value="">— select a city —</option>
+            __CITY_OPTIONS__
+          </select>
+        </div>
+
+        <!-- History window -->
+        <div>
+          <label class="block text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">
+            History window
+          </label>
+          <select x-model="hours"
+                  class="rounded-xl px-4 py-2.5 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 border border-gray-700"
+                  style="background:#161d33">
+            <option value="24">Last 24 h</option>
+            <option value="48" selected>Last 48 h</option>
+            <option value="72">Last 72 h</option>
+            <option value="168">Last 7 days</option>
+          </select>
+        </div>
+
+        <!-- Run button -->
+        <button @click="fetchAll()"
+                :disabled="!selectedCity || loading"
+                class="px-7 py-2.5 rounded-xl font-semibold text-sm text-white transition-all
+                       bg-blue-600 hover:bg-blue-500
+                       disabled:opacity-40 disabled:cursor-not-allowed"
+                :title="!selectedCity ? 'Select a city first' : 'Run forecast'">
+          <span x-show="!loading">Run Forecast</span>
+          <span x-show="loading" class="flex items-center gap-2">
+            <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+            </svg>
+            Fetching…
+          </span>
+        </button>
+      </div>
+
+      <!-- Error -->
+      <div x-show="error" x-transition
+           class="mt-3 flex items-center gap-2 text-sm text-red-400 bg-red-950/40 rounded-lg px-4 py-2.5 border border-red-900">
+        <span x-text="error"></span>
+      </div>
+    </section>
+
+    <!-- ── FORECAST TAB ────────────────────────────────────────────────────── -->
+    <div x-show="activeView === 'forecast'" class="space-y-6">
+    <!-- ── Prediction Cards ───────────────────────────────────────────────── -->
+    <div x-show="prediction" x-transition class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+
+      <!-- Current AQI -->
+      <div class="rounded-2xl p-5 border border-gray-800 flex items-center gap-4" style="background:#0d1224">
+        <div class="w-16 h-16 rounded-2xl flex-shrink-0 flex items-center justify-center text-2xl font-black shadow-lg"
+             :style="'background:' + (prediction?.current_color || '#333') + '22; border: 2px solid ' + (prediction?.current_color || '#333')">
+          <span :style="'color:' + (prediction?.current_color || '#fff')" x-text="prediction?.current_aqi"></span>
+        </div>
+        <div>
+          <p class="text-[11px] text-gray-500 uppercase tracking-wider font-semibold">Current AQI</p>
+          <p class="text-xl font-bold mt-0.5" x-text="prediction?.current_label"></p>
+          <p class="text-[11px] text-gray-600 mt-1" x-text="prediction?.as_of ? fmtTs(prediction.as_of) : ''"></p>
+        </div>
+      </div>
+
+      <!-- Next-Hour Prediction -->
+      <div class="rounded-2xl p-5 border-2 flex items-center gap-4"
+           :style="'background:#0d1224; border-color:' + (prediction?.next_hour?.color || '#333') + '55'"
+           style="background:#0d1224">
+        <div class="w-16 h-16 rounded-2xl flex-shrink-0 flex items-center justify-center text-2xl font-black shadow-lg"
+             :style="'background:' + (prediction?.next_hour?.color || '#333') + '; color:#000'">
+          <span x-text="prediction?.next_hour?.predicted_aqi"></span>
+        </div>
+        <div>
+          <p class="text-[11px] text-gray-500 uppercase tracking-wider font-semibold">Next Hour</p>
+          <p class="text-xl font-bold mt-0.5" x-text="prediction?.next_hour?.label"></p>
+          <p class="text-[11px] text-gray-500 mt-1">
+            Confidence: <span class="text-white font-semibold" x-text="topProb"></span>
+          </p>
+        </div>
+      </div>
+
+      <!-- Accuracy -->
+      <div class="rounded-2xl p-5 border border-gray-800 flex items-center gap-4" style="background:#0d1224">
+        <div class="w-16 h-16 rounded-2xl flex-shrink-0 flex items-center justify-center text-xl font-black border-2 border-green-500"
+             style="background:#052e16">
+          <span class="text-green-400" x-text="accuracy !== null ? accuracy + '%' : '—'"></span>
+        </div>
+        <div>
+          <p class="text-[11px] text-gray-500 uppercase tracking-wider font-semibold">Forecast Accuracy</p>
+          <p class="text-sm text-gray-400 mt-0.5">Exact class match</p>
+          <p class="text-[11px] text-gray-600 mt-1" x-text="history.length ? 'Over last ' + history.length + ' hours' : ''"></p>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── Probability Distribution ──────────────────────────────────────── -->
+    <section x-show="prediction" x-transition
+             class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+      <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-4">
+        Next-Hour Class Probability
+      </h2>
+      <div class="h-36">
+        <canvas id="probaChart"></canvas>
+      </div>
+    </section>
+
+    <!-- ── History Chart ──────────────────────────────────────────────────── -->
+    <section class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+          Predicted vs Actual AQI
+        </h2>
+        <div class="flex gap-5 text-[11px] text-gray-500">
+          <span class="flex items-center gap-1.5">
+            <span class="w-3 h-0.5 rounded bg-blue-400 inline-block"></span> Predicted
+          </span>
+          <span class="flex items-center gap-1.5">
+            <span class="w-3 h-0.5 rounded bg-orange-400 inline-block"></span> Actual
+          </span>
+        </div>
+      </div>
+      <div class="h-72">
+        <canvas id="historyChart"></canvas>
+      </div>
+      <p x-show="!history.length && !loading"
+         class="text-center text-gray-700 text-sm py-10">
+        Select a city and click Run Forecast to load history
+      </p>
+    </section>
+
+    </div><!-- /forecast -->
+
+    <!-- ── DATA DRIFT TAB ─────────────────────────────────────────────────── -->
+    <div x-show="activeView === 'drift'" x-transition class="space-y-6">
+
+      <!-- Window selector -->
+      <div class="flex items-center gap-3">
+        <span class="text-[11px] text-gray-500 uppercase tracking-wider font-semibold">Window:</span>
+        <div class="flex gap-1">
+          <button @click="driftWindow='1d'; drift=null; fetchDrift()"
+                  :class="driftWindow==='1d' ? 'bg-purple-700 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'"
+                  class="px-3 py-1 rounded-lg text-xs font-semibold transition-colors">Today vs Yesterday</button>
+          <button @click="driftWindow='7d'; drift=null; fetchDrift()"
+                  :class="driftWindow==='7d' ? 'bg-purple-700 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'"
+                  class="px-3 py-1 rounded-lg text-xs font-semibold transition-colors">This Week vs Prior Week</button>
+        </div>
+      </div>
+
+      <!-- Loading / empty state -->
+      <div x-show="driftLoading" class="flex items-center justify-center py-20 text-gray-500 gap-3">
+        <svg class="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+        </svg>
+        Fetching drift data from Athena…
+      </div>
+      <div x-show="!drift && !driftLoading"
+           class="flex flex-col items-center justify-center py-20 text-gray-700 gap-2">
+        <span class="text-sm">Click the Data Drift tab to load global drift analysis</span>
+      </div>
+
+      <!-- Info bar -->
+      <div x-show="drift && !driftLoading" x-transition
+           class="rounded-2xl px-5 py-4 border border-gray-800 text-xs text-gray-400 space-y-1"
+           style="background:#0d1224">
+        <p class="text-gray-400 font-semibold text-[10px] uppercase tracking-widest pb-1"
+           x-text="driftWindow === '1d' ? 'Daily comparison \u2014 today vs yesterday' : 'Weekly comparison \u2014 this week vs prior week'"
+        ></p>
+        <p>
+          <span class="text-gray-500 font-semibold uppercase tracking-wider">Scope:</span>
+          <span class="text-white ml-2" x-text="drift?.city"></span>
+        </p>
+        <p>
+          <span class="text-gray-500 font-semibold uppercase tracking-wider">Reference window:</span>
+          <span class="ml-2" x-text="drift?.ref_window"></span>
+          <span class="ml-1 text-gray-600" x-text="'(' + (drift?.ref_rows || 0) + ' rows)'"></span>
+        </p>
+        <p>
+          <span class="text-gray-500 font-semibold uppercase tracking-wider">Recent window:</span>
+          <span class="ml-2" x-text="drift?.recent_window"></span>
+          <span class="ml-1 text-gray-600" x-text="'(' + (drift?.recent_rows || 0) + ' rows)'"></span>
+        </p>
+        <p class="pt-1">
+          <span class="inline-flex items-center gap-1.5 mr-4">
+            <span class="w-2.5 h-2.5 rounded-full bg-green-500"></span>
+            <span>&#124;z&#124; &lt; 0.5 &mdash; Negligible</span>
+          </span>
+          <span class="inline-flex items-center gap-1.5 mr-4">
+            <span class="w-2.5 h-2.5 rounded-full bg-yellow-400"></span>
+            <span>&#124;z&#124; 0.5&ndash;1.0 &mdash; Moderate</span>
+          </span>
+          <span class="inline-flex items-center gap-1.5 mr-4">
+            <span class="w-2.5 h-2.5 rounded-full bg-orange-500"></span>
+            <span>&#124;z&#124; 1.0&ndash;2.0 &mdash; Significant</span>
+          </span>
+          <span class="inline-flex items-center gap-1.5">
+            <span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>
+            <span>&#124;z&#124; &gt; 2.0 &mdash; High</span>
+          </span>
+        </p>
+      </div>
+
+      <!-- Feature drift chart -->
+      <section x-show="drift && !driftLoading" x-transition
+               class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+        <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-4">
+          Feature Drift Score (z-score)
+        </h2>
+        <div class="h-64">
+          <canvas id="driftFeatChart"></canvas>
+        </div>
+      </section>
+
+      <!-- Prediction Distribution Shift -->
+      <section x-show="drift?.prediction_distribution && !driftLoading" x-transition
+               class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+            Prediction Distribution Shift
+          </h2>
+          <div class="flex gap-5 text-[11px] text-gray-500">
+            <span class="flex items-center gap-1.5">
+              <span class="w-3 h-0.5 rounded inline-block" style="background:#9ca3af"></span> Reference
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-3 h-0.5 rounded inline-block" style="background:#60a5fa"></span> Recent
+            </span>
+          </div>
+        </div>
+        <div class="h-64"><canvas id="driftPredChart"></canvas></div>
+      </section>
+
+      <!-- Feature stats table -->
+      <section x-show="drift && !driftLoading" x-transition
+               class="rounded-2xl p-5 border border-gray-800 overflow-x-auto" style="background:#0d1224">
+        <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-4">
+          Feature Statistics
+        </h2>
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-[11px] text-gray-500 uppercase tracking-wider border-b border-gray-800">
+              <th class="text-left pb-2 pr-6">Feature</th>
+              <th class="text-right pb-2 pr-6">Ref Mean</th>
+              <th class="text-right pb-2 pr-6">Recent Mean</th>
+              <th class="text-right pb-2 pr-6">Δ %</th>
+              <th class="text-right pb-2">Drift Score (σ)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="[feat, stats] in Object.entries(drift?.features || {})" :key="feat">
+              <tr class="border-b border-gray-900">
+                <td class="py-2 pr-6 font-mono text-xs text-gray-300" x-text="feat"></td>
+                <td class="text-right pr-6 text-gray-400" x-text="stats.ref_mean"></td>
+                <td class="text-right pr-6 text-gray-400" x-text="stats.recent_mean"></td>
+                <td class="text-right pr-6"
+                    :class="pctChange(stats) > 0 ? 'text-orange-400' : pctChange(stats) < 0 ? 'text-blue-400' : 'text-gray-500'"
+                    x-text="(pctChange(stats) >= 0 ? '+' : '') + pctChange(stats) + '%'"></td>
+                <td class="text-right"
+                    :class="driftClass(stats.drift_score)"
+                    x-text="stats.drift_score + 'σ'"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- Accuracy Trend Chart (Concept Drift) -->
+      <section class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+              Accuracy Trend &mdash; Concept Drift Detection
+            </h2>
+            <p class="text-[11px] text-gray-600 mt-0.5">Daily exact-match accuracy over last 8 weeks — all 99 cities pooled. Declining trend = concept drift.</p>
+          </div>
+          <span x-show="accTrend?.concept_drift_flag"
+                class="text-xs font-bold px-3 py-1 rounded-full bg-red-900/60 text-red-400 border border-red-700 animate-pulse">
+            ⚠ Concept Drift Detected
+          </span>
+          <span x-show="accTrend && !accTrend.concept_drift_flag"
+                class="text-xs font-semibold px-3 py-1 rounded-full bg-green-900/40 text-green-400 border border-green-800">
+            Stable
+          </span>
+        </div>
+
+        <!-- stats row -->
+        <div x-show="accTrend" x-transition class="flex gap-6 mb-4 text-sm">
+          <div>
+            <p class="text-[10px] text-gray-500 uppercase tracking-wider">Last 7d</p>
+            <p class="font-bold text-lg"
+               :class="accTrend?.last_7d_accuracy >= 0.8 ? 'text-green-400' : accTrend?.last_7d_accuracy >= 0.6 ? 'text-yellow-400' : 'text-red-400'"
+               x-text="accTrend ? (accTrend.last_7d_accuracy * 100).toFixed(1) + '%' : '—'"></p>
+          </div>
+          <div>
+            <p class="text-[10px] text-gray-500 uppercase tracking-wider">Prior 7d</p>
+            <p class="font-bold text-lg text-gray-400"
+               x-text="accTrend?.prior_7d_accuracy !== null ? (accTrend.prior_7d_accuracy * 100).toFixed(1) + '%' : '—'"></p>
+          </div>
+          <div>
+            <p class="text-[10px] text-gray-500 uppercase tracking-wider">WoW Δ</p>
+            <p class="font-bold text-lg"
+               :class="(accTrend?.wow_delta || 0) >= 0 ? 'text-green-400' : Math.abs(accTrend?.wow_delta || 0) > 0.1 ? 'text-red-400' : 'text-yellow-400'"
+               x-text="accTrend?.wow_delta !== null ? ((accTrend.wow_delta >= 0 ? '+' : '') + (accTrend.wow_delta * 100).toFixed(1) + '%') : '—'"></p>
+          </div>
+        </div>
+
+        <div x-show="accTrendLoading" class="flex items-center justify-center py-16 text-gray-500 gap-3">
+          <svg class="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+          </svg>
+          Loading accuracy trend…
+        </div>
+        <div x-show="!accTrend && !accTrendLoading"
+             class="flex flex-col items-center justify-center py-12 text-gray-700 text-sm gap-1">
+          <span>Open the Data Drift tab to load the global accuracy trend</span>
+        </div>
+
+        <div x-show="accTrend && !accTrendLoading" x-transition class="h-56">
+          <canvas id="accTrendChart"></canvas>
+        </div>
+      </section>
+
+    </div><!-- /drift -->
+
+    <!-- ── METRICS TAB ─────────────────────────────────────────────────────── -->
+    <div x-show="activeView === 'metrics'" x-transition class="space-y-6">
+
+      <!-- Window selector (top-of-tab filter, mirrors drift tab) -->
+      <div class="flex items-center gap-3">
+        <span class="text-[11px] text-gray-500 uppercase tracking-wider font-semibold">Window:</span>
+        <div class="flex gap-1">
+          <template x-for="[val, label] in [['24','24h'],['48','48h'],['72','72h'],['168','7d']]" :key="val">
+            <button @click="metricsHours=val; liveMetrics=null; _cachedMetricsHours=null; fetchLiveMetrics()"
+                    :class="metricsHours===val ? 'bg-green-700 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'"
+                    class="px-3 py-1 rounded-lg text-xs font-semibold transition-colors"
+                    x-text="label"></button>
+          </template>
+        </div>
+        <span x-show="metricsLoading" class="text-xs text-gray-500 animate-pulse ml-2">Computing&hellip;</span>
+        <span x-show="!metricsLoading && liveMetrics" class="text-xs text-gray-600 ml-2" x-text="liveMetrics?.computed_at || ''"></span>
+      </div>
+
+      <div x-show="metaLoading" class="flex items-center justify-center py-16 text-gray-500 gap-3">
+        <svg class="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+        </svg>
+        Loading…
+      </div>
+
+      <!-- Top metric cards -->
+      <div x-show="meta && !metaLoading" x-transition class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+
+        <!-- Status -->
+        <div class="rounded-2xl p-5 border border-gray-800 space-y-2" style="background:#0d1224">
+          <p class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">API Status</p>
+          <div class="flex items-center gap-2 mt-1">
+            <span class="w-2.5 h-2.5 rounded-full"
+                  :class="meta?.model_loaded ? 'bg-green-500 animate-pulse' : 'bg-red-500'"></span>
+            <span class="text-white font-bold text-lg"
+                  x-text="meta?.model_loaded ? 'Online' : 'Model missing'"></span>
+          </div>
+          <p class="text-xs text-gray-600" x-text="'Server: ' + (meta?.server_time_utc || '—')"></p>
+        </div>
+
+        <!-- Model Info -->
+        <div class="rounded-2xl p-5 border border-gray-800 space-y-1" style="background:#0d1224">
+          <p class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Model</p>
+          <p class="text-white font-bold" x-text="meta?.model_type || '—'"></p>
+          <p class="text-xs text-gray-500">
+            <span x-text="meta?.n_features"></span> features &rarr;
+            <span x-text="meta?.n_classes"></span> AQI classes
+          </p>
+          <p class="text-xs text-gray-600" x-text="'Trained: ' + (meta?.model_trained_on || '—')"></p>
+        </div>
+
+        <!-- Cities -->
+        <div class="rounded-2xl p-5 border border-gray-800 space-y-1" style="background:#0d1224">
+          <p class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Coverage</p>
+          <p class="text-white font-black text-3xl" x-text="meta?.n_cities || '—'"></p>
+          <p class="text-xs text-gray-500">Cities monitored globally</p>
+          <p class="text-xs text-gray-600" x-text="'Target: ' + (meta?.target || '—')"></p>
+        </div>
+
+        <!-- Global weighted F1 — from /model-metrics (all 99 cities) -->
+        <div class="rounded-2xl p-5 border border-gray-800 space-y-1" style="background:#0d1224">
+          <p class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Global Weighted F1</p>
+          <p class="font-black text-3xl"
+             :class="liveMetrics ? (liveMetrics.weighted.f1 >= 0.8 ? 'text-green-400' : liveMetrics.weighted.f1 >= 0.6 ? 'text-yellow-400' : 'text-red-400') : 'text-gray-700'"
+             x-text="liveMetrics ? (liveMetrics.weighted.f1 * 100).toFixed(1) + '%' : (metricsLoading ? '\u2026' : '\u2014')"></p>
+          <p class="text-xs text-gray-500" x-text="liveMetrics ? liveMetrics.n_predictions + ' predictions · last ' + metricsHours + 'h' : 'All 99 cities pooled'"></p>
+          <p class="text-xs text-gray-600">All 99 cities &mdash; no city filter</p>
+        </div>
+
+      </div>
+
+      <!-- Live Production Metrics -->
+      <div x-show="meta && !metaLoading" x-transition class="space-y-3">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Live Production Metrics</h2>
+          <span x-show="!metricsLoading && !liveMetrics" class="text-xs text-orange-400">Need &ge; 10 labelled rows in Athena</span>
+        </div>
+
+        <!-- F1 / Precision / Recall giant cards -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+
+          <div class="rounded-2xl p-5 border border-gray-800 space-y-2" style="background:#0d1224">
+            <p class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Weighted F1</p>
+            <p class="font-black text-4xl"
+               :class="liveMetrics ? (liveMetrics.weighted.f1 >= 0.8 ? 'text-green-400' : liveMetrics.weighted.f1 >= 0.6 ? 'text-yellow-400' : 'text-red-400') : 'text-gray-700'"
+               x-text="liveMetrics ? (liveMetrics.weighted.f1 * 100).toFixed(1) + '%' : (metricsLoading ? '\u2026' : '\u2014')"></p>
+            <p class="text-xs text-gray-600" x-text="liveMetrics ? liveMetrics.n_predictions + ' predictions' : ''"></p>
+          </div>
+
+          <div class="rounded-2xl p-5 border border-gray-800 space-y-2" style="background:#0d1224">
+            <p class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Weighted Precision</p>
+            <p class="font-black text-4xl"
+               :class="liveMetrics ? (liveMetrics.weighted.precision >= 0.8 ? 'text-green-400' : liveMetrics.weighted.precision >= 0.6 ? 'text-yellow-400' : 'text-red-400') : 'text-gray-700'"
+               x-text="liveMetrics ? (liveMetrics.weighted.precision * 100).toFixed(1) + '%' : (metricsLoading ? '\u2026' : '\u2014')"></p>
+            <p class="text-xs text-gray-500 mt-1">TP / (TP + FP) per class</p>
+          </div>
+
+          <div class="rounded-2xl p-5 border border-gray-800 space-y-2" style="background:#0d1224">
+            <p class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Weighted Recall</p>
+            <p class="font-black text-4xl"
+               :class="liveMetrics ? (liveMetrics.weighted.recall >= 0.8 ? 'text-green-400' : liveMetrics.weighted.recall >= 0.6 ? 'text-yellow-400' : 'text-red-400') : 'text-gray-700'"
+               x-text="liveMetrics ? (liveMetrics.weighted.recall * 100).toFixed(1) + '%' : (metricsLoading ? '\u2026' : '\u2014')"></p>
+            <p class="text-xs text-gray-500 mt-1">TP / (TP + FN) per class</p>
+          </div>
+
+        </div>
+
+        <!-- Per-class breakdown table -->
+        <div x-show="liveMetrics" x-transition class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+          <h3 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Per-Class Breakdown</h3>
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-[10px] text-gray-500 uppercase">
+                <th class="text-left pb-2">AQI Class</th>
+                <th class="text-right pb-2">F1</th>
+                <th class="text-right pb-2">Precision</th>
+                <th class="text-right pb-2">Recall</th>
+                <th class="text-right pb-2">Support</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="[cls, m] in Object.entries(liveMetrics?.per_class || {})" :key="cls">
+                <tr class="border-t border-gray-800">
+                  <td class="py-1.5 text-gray-300 font-medium">
+                    <span class="inline-block w-2 h-2 rounded-full mr-1.5"
+                          :style="'background:' + _aqiColors[+cls]"></span>
+                    <span x-text="cls + ' \u00b7 ' + ['','Good','Fair','Moderate','Poor','Very Poor'][+cls]"></span>
+                  </td>
+                  <td class="py-1.5 text-right tabular-nums"
+                      :class="m.f1 >= 0.8 ? 'text-green-400' : m.f1 >= 0.5 ? 'text-yellow-400' : 'text-red-400'"
+                      x-text="(m.f1 * 100).toFixed(1) + '%'"></td>
+                  <td class="py-1.5 text-right tabular-nums text-gray-300" x-text="(m.precision * 100).toFixed(1) + '%'"></td>
+                  <td class="py-1.5 text-right tabular-nums text-gray-300" x-text="(m.recall * 100).toFixed(1) + '%'"></td>
+                  <td class="py-1.5 text-right tabular-nums text-gray-500" x-text="m.support"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+
+      <!-- Data freshness + drift summary row -->
+      <div x-show="meta && !metaLoading" x-transition class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+        <!-- Data freshness -->
+        <div class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+          <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Data Freshness</h2>
+          <template x-if="prediction">
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between">
+                <span class="text-gray-500">City</span>
+                <span class="text-white font-medium" x-text="prediction.city"></span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-gray-500">Last observation</span>
+                <span class="text-white font-medium" x-text="fmtTs(prediction.as_of)"></span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-gray-500">Data age</span>
+                <span x-text="dataAge()" :class="dataAgeHours() > 3 ? 'text-orange-400' : 'text-green-400'"
+                      class="font-medium"></span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-gray-500">Current AQI</span>
+                <span class="font-bold"
+                      :style="'color:' + prediction.current_color"
+                      x-text="prediction.current_aqi + ' · ' + prediction.current_label"></span>
+              </div>
+            </div>
+          </template>
+          <p x-show="!prediction" class="text-sm text-gray-700">Select a city and run forecast first</p>
+        </div>
+
+        <!-- Drift summary -->
+        <div class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+          <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-3">
+            Drift Summary &mdash; Current vs Prior Week
+          </h2>
+          <template x-if="drift">
+            <div class="space-y-2">
+              <template x-for="[feat, s] in Object.entries(drift.features)" :key="feat">
+                <div class="flex items-center gap-2">
+                  <span class="w-2 h-2 rounded-full flex-shrink-0"
+                        :style="'background:' + _driftColor(s.drift_score)"></span>
+                  <span class="text-xs text-gray-400 w-24 flex-shrink-0" x-text="feat"></span>
+                  <div class="flex-1 bg-gray-900 rounded-full h-1.5 overflow-hidden">
+                    <div class="h-1.5 rounded-full transition-all"
+                         :style="'width:' + Math.min(Math.abs(s.drift_score) / 3 * 100, 100) + '%; background:' + _driftColor(s.drift_score)"></div>
+                  </div>
+                  <span class="text-xs tabular-nums w-14 text-right"
+                        :class="driftClass(s.drift_score)"
+                        x-text="s.drift_score + 'σ'"></span>
+                </div>
+              </template>
+            </div>
+          </template>
+          <p x-show="!drift" class="text-sm text-gray-700">
+            Switch to the Data Drift tab to load drift analysis
+          </p>
+        </div>
+
+      </div>
+
+      <!-- Auto-refresh settings -->
+      <div x-show="meta && !metaLoading" x-transition
+           class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Auto-refresh</h2>
+            <p class="text-xs text-gray-600 mt-1">Forecast + drift re-fetched automatically every hour</p>
+          </div>
+          <div class="flex items-center gap-4">
+            <div class="text-right">
+              <p class="text-xs text-gray-500">Next refresh in</p>
+              <p class="text-white font-mono font-bold text-lg" x-text="fmtCountdown(nextRefreshSec)"></p>
+            </div>
+            <button @click="triggerRefresh()"
+                    :disabled="loading"
+                    class="px-5 py-2 rounded-xl text-sm font-semibold bg-green-700 hover:bg-green-600 disabled:opacity-40 transition-all">
+              Refresh Now
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Retrain guidance -->
+      <div x-show="meta && !metaLoading" x-transition
+           class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+        <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Daily Retrain Workflow</h2>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+          <div class="space-y-1">
+            <p class="text-gray-400 font-semibold">1. Check drift daily</p>
+            <p class="text-gray-600 text-xs">Open Data Drift tab. If any feature |z| &gt; 1.0 (orange/red), retrain is recommended.</p>
+          </div>
+          <div class="space-y-1">
+            <p class="text-gray-400 font-semibold">2. Rolling retrain (1 year)</p>
+            <code class="block text-green-400 bg-gray-900 rounded px-3 py-2 text-xs mt-1">python ml/train.py --lookback-weeks 52</code>
+          </div>
+          <div class="space-y-1">
+            <p class="text-gray-400 font-semibold">3. Automated via cron (05:00 UTC)</p>
+            <code class="block text-green-400 bg-gray-900 rounded px-3 py-2 text-xs mt-1">bash ml/retrain_daily.sh</code>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /metrics -->
+
+    <!-- ── MODEL TAB ─────────────────────────────────────────────────────────────────────── -->
+    <div x-show="activeView === 'model'" x-transition class="space-y-6">
+
+      <!-- Loading -->
+      <div x-show="featImpLoading" class="flex items-center justify-center py-20 text-gray-500 gap-3">
+        <svg class="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+        </svg>
+        Loading feature importance…
+      </div>
+
+      <!-- Importance type toggle -->
+      <div x-show="featImp && !featImpLoading" x-transition class="flex items-center gap-2">
+        <span class="text-xs text-gray-500 uppercase tracking-wider mr-1">Importance type</span>
+        <template x-for="t in ['gain','weight','cover']" :key="t">
+          <button @click="featImpType = t; $nextTick(() => _renderFeatImpChart())"
+                  :class="featImpType === t ? 'bg-yellow-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'"
+                  class="px-3 py-1 rounded text-xs font-semibold transition-colors capitalize"
+                  x-text="t"></button>
+        </template>
+        <span class="ml-auto text-[10px] text-gray-600" x-text="featImp ? 'Computed ' + featImp.computed_at : ''"></span>
+      </div>
+
+      <!-- Horizontal bar chart -->
+      <section x-show="featImp && !featImpLoading" x-transition
+               class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+        <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-4">
+          Feature Importance
+          <span class="ml-2 text-gray-700 normal-case capitalize" x-text="'(' + featImpType + ')'" ></span>
+        </h2>
+        <div class="h-80"><canvas id="featImpChart"></canvas></div>
+      </section>
+
+      <!-- Importance table -->
+      <section x-show="featImp && !featImpLoading" x-transition
+               class="rounded-2xl p-5 border border-gray-800 overflow-x-auto" style="background:#0d1224">
+        <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-4">All Types Comparison</h2>
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-[11px] text-gray-500 uppercase tracking-wider border-b border-gray-800">
+              <th class="text-left pb-2 pr-6">Feature</th>
+              <th class="text-right pb-2 pr-6">Gain</th>
+              <th class="text-right pb-2 pr-6">Weight</th>
+              <th class="text-right pb-2">Cover</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="feat in (featImp?.features || []).slice().sort((a,b) => (featImp.gain[b]||0)-(featImp.gain[a]||0))" :key="feat">
+              <tr class="border-b border-gray-900">
+                <td class="py-2 pr-6 font-mono text-xs text-gray-300" x-text="feat"></td>
+                <td class="text-right pr-6"
+                    :class="(featImp.gain[feat]||0) >= 0.15 ? 'text-yellow-400 font-semibold' : 'text-gray-400'"
+                    x-text="((featImp.gain[feat]||0)*100).toFixed(1) + '%'"></td>
+                <td class="text-right pr-6 text-gray-400"
+                    x-text="((featImp.weight[feat]||0)*100).toFixed(1) + '%'"></td>
+                <td class="text-right text-gray-400"
+                    x-text="((featImp.cover[feat]||0)*100).toFixed(1) + '%'"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- Trend chart -->
+      <section x-show="featImpHistory && featImpHistory.length > 1 && !featImpLoading" x-transition
+               class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+        <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1">
+          Gain Trend
+          <span class="ml-2 text-gray-700 normal-case font-normal">how top feature influence shifts after each daily retrain</span>
+        </h2>
+        <p x-show="featImpHistory && featImpHistory.length < 2" class="text-xs text-gray-600 mt-2">Trend available after 2+ retrains. Check back tomorrow.</p>
+        <div class="h-64 mt-3"><canvas id="featImpTrendChart"></canvas></div>
+      </section>
+      <p x-show="featImp && !featImpLoading && featImpHistory && featImpHistory.length < 2"
+         class="text-xs text-gray-600 text-center py-2">
+        Gain trend chart will appear after the second daily retrain (05:00 UTC).
+      </p>
+
+      <!-- Interpretation guide -->
+      <section x-show="featImp && !featImpLoading" x-transition
+               class="rounded-2xl p-5 border border-gray-800" style="background:#0d1224">
+        <h2 class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-3">How to Read</h2>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs text-gray-500">
+          <div><span class="text-yellow-400 font-semibold">Gain</span> — avg. reduction in loss when this feature is used in a split. Best proxy for predictive power.</div>
+          <div><span class="text-yellow-400 font-semibold">Weight</span> — how often this feature appears in splits across all trees. High = frequently used, not necessarily impactful.</div>
+          <div><span class="text-yellow-400 font-semibold">Cover</span> — avg. number of training samples affected by splits on this feature. High = broadly applicable splits.</div>
+        </div>
+      </section>
+
+    </div><!-- /model -->
+
+  </main>
+
+  <!-- ── Alpine component ───────────────────────────────────────────────────── -->
+  <script>
+  function dashboard() {
+    return {
+      // state
+      selectedCity: '',
+      hours:        '48',
+      loading:      false,
+      error:        '',
+      prediction:   null,
+      history:      [],
+      accuracy:     null,
+      lastUpdated:  '',
+      activeView:   new URLSearchParams(location.search).get('view') || 'forecast',
+      cityTimezone: 'UTC',
+
+      // drift state
+      drift:             null,
+      driftCity:         null,
+      driftLoading:      false,
+      driftWindow:       '1d',
+      driftWindowLoaded: null,
+
+      // accuracy trend state
+      accTrend:          null,
+      accTrendCity:      null,
+      accTrendLoading:   false,
+      _accTrendChart:    null,
+
+      // feature importance state
+      featImp:             null,
+      featImpHistory:      null,
+      featImpLoading:      false,
+      featImpType:         'gain',
+      _featImpChart:       null,
+      _featImpTrendChart:  null,
+
+      // metrics / dashboard state
+      meta:           null,
+      metaLoading:    false,
+      nextRefreshSec: 3600,
+      _refreshTimer:  null,
+      _cdTimer:       null,
+
+      // live production metrics state
+      liveMetrics:         null,
+      metricsLoading:      false,
+      _cachedMetricsHours: null,
+      metricsHours:        '168',
+
+      // chart instances
+      _probaChart:    null,
+      _histChart:     null,
+      _driftFeatChart: null,
+      _driftPredChart: null,
+
+      // AQI colours (matches Python AQI_META)
+      _aqiColors: {
+        1: '#50f0e6',
+        2: '#50ccaa',
+        3: '#f0e641',
+        4: '#ff5050',
+        5: '#960032',
+      },
+
+      // ── Computed ───────────────────────────────────────────────────────────
+      get topProb() {
+        const probs = this.prediction?.next_hour?.probabilities
+        if (!probs) return '—'
+        const cls = String(this.prediction.next_hour.predicted_aqi)
+        const p   = probs[cls]
+        return p != null ? (p * 100).toFixed(1) + '%' : '—'
+      },
+
+      // ── Navigation ─────────────────────────────────────────────────────────
+      setView(v) {
+        this.activeView = v
+        history.pushState({}, '', '?view=' + v)
+        if (v === 'drift')   { this.fetchDrift(); this.fetchAccuracyTrend() }
+        if (v === 'metrics') { this.fetchMeta(); this.fetchLiveMetrics() }
+        if (v === 'model')   this.fetchFeatImp()
+      },
+
+      // ── Lifecycle ──────────────────────────────────────────────────────────
+      async init() {
+        await this.fetchMeta()
+        this._startAutoRefresh()
+        // If page was loaded with ?view=drift or ?view=metrics, trigger data load
+        if (this.activeView === 'drift')   { this.fetchDrift(); this.fetchAccuracyTrend() }
+        if (this.activeView === 'metrics') this.fetchLiveMetrics()
+      },
+
+      // ── Actions ────────────────────────────────────────────────────────────
+      async fetchAll() {
+        if (!this.selectedCity) return
+        this.loading  = true
+        this.error    = ''
+        // Clear stale data so canvas sections go through a fresh show transition,
+        // ensuring Chart.js always initialises on a laid-out, visible canvas.
+        this.prediction = null
+        this.history    = []
+        this.accuracy   = null
+        try {
+          const [predRes, histRes] = await Promise.all([
+            fetch(`/predict/${this.selectedCity}`),
+            fetch(`/history/${this.selectedCity}?hours=${this.hours}`),
+          ])
+
+          if (!predRes.ok) {
+            let detail = 'Prediction request failed'
+            try { detail = (await predRes.json()).detail || detail } catch {}
+            throw new Error(detail)
+          }
+          if (!histRes.ok) {
+            let detail = 'History request failed'
+            try { detail = (await histRes.json()).detail || detail } catch {}
+            throw new Error(detail)
+          }
+
+          this.prediction   = await predRes.json()
+          this.cityTimezone = this.prediction?.timezone || 'UTC'
+          this.history      = await histRes.json()
+
+          // ── Append T+1 forecast point ──────────────────────────────────
+          // batch_predict now uses row_next timestamps, so the last history
+          // entry already lands at as_of (8:24). We only need to append the
+          // forecast point at forecast_for (9:24) — no bridge needed.
+          if (this.prediction?.next_hour && this.prediction?.forecast_for) {
+            const raw = this.prediction.forecast_for
+            const ts  = raw.endsWith('Z') || raw.includes('+') ? raw : raw + 'Z'
+            this.history = [
+              ...this.history,
+              {
+                timestamp:   ts,
+                predicted:   this.prediction.next_hour.predicted_aqi,
+                actual:      null,
+                is_forecast: true,
+              },
+            ]
+          }
+
+          this.lastUpdated = new Date().toLocaleTimeString()
+          this._computeAccuracy()
+          // Reset per-city caches when city changes
+          if (this.driftWindowLoaded !== null && false) { /* drift is global, never invalidated by city */ }
+          if (this.accTrendCity !== this.selectedCity) { this.accTrend = null; this.accTrendCity = null }
+          // metrics are global — no invalidation needed when city changes
+          // If drift tab is already open, auto-fetch accuracy trend for new city (drift is already loaded)
+          if (this.activeView === 'drift') { this.fetchAccuracyTrend() }
+
+          // Wait for Alpine's x-transition (150ms) to finish showing the canvas
+          // sections before Chart.js queries their dimensions.
+          this.loading = false
+          await new Promise(r => setTimeout(r, 250))
+          this._renderProbaChart()
+          this._renderHistoryChart()
+        } catch (e) {
+          this.error   = e.message
+          this.loading = false
+        }
+      },
+
+      // ── Helpers ────────────────────────────────────────────────────────────
+      fmtTs(ts, tz) {
+        try {
+          const zone = tz || this.cityTimezone || 'UTC'
+          const raw  = (ts && !ts.endsWith('Z') && !ts.includes('+')) ? ts + 'Z' : ts
+          return new Date(raw).toLocaleString(undefined, {
+            timeZone:   zone,
+            month:      'short',
+            day:        'numeric',
+            hour:       '2-digit',
+            minute:     '2-digit',
+            hourCycle:  'h23',
+          })
+        } catch { return ts }
+      },
+
+      _computeAccuracy() {
+        const valid = this.history.filter(r => r.actual !== null)
+        if (!valid.length) { this.accuracy = null; return }
+        const correct = valid.filter(r => r.predicted === r.actual).length
+        this.accuracy = Math.round(correct / valid.length * 100)
+      },
+
+      // ── Charts ─────────────────────────────────────────────────────────────
+      _renderProbaChart() {
+        const probs = this.prediction?.next_hour?.probabilities
+        if (!probs) return
+
+        const labels = ['1 · Good', '2 · Fair', '3 · Moderate', '4 · Poor', '5 · Very Poor']
+        const data   = [1, 2, 3, 4, 5].map(i => +((probs[String(i)] || 0) * 100).toFixed(1))
+        const colors = [1, 2, 3, 4, 5].map(i => this._aqiColors[i])
+
+        // Defensive destroy: use Chart.js registry so stale references never block canvas reuse
+        const prev = Chart.getChart('probaChart'); if (prev) prev.destroy()
+        const ctx = document.getElementById('probaChart').getContext('2d')
+        this._probaChart = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [{
+              data,
+              backgroundColor:      colors.map(c => c + 'cc'),
+              borderColor:          colors,
+              borderWidth:          1,
+              borderRadius:         6,
+              borderSkipped:        false,
+            }],
+          },
+          options: {
+            responsive:          true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: { label: ctx => ` ${ctx.raw}%` },
+              },
+            },
+            scales: {
+              y: {
+                min: 0, max: 100,
+                grid:  { color: '#1f2937' },
+                ticks: { color: '#6b7280', callback: v => v + '%' },
+              },
+              x: {
+                grid:  { display: false },
+                ticks: { color: '#9ca3af', font: { size: 11 } },
+              },
+            },
+          },
+        })
+        this._probaChart.resize()
+      },
+
+      _renderHistoryChart() {
+        if (!this.history.length) return
+
+        const names   = { 1:'Good', 2:'Fair', 3:'Moderate', 4:'Poor', 5:'Very Poor' }
+        const labels  = this.history.map(r => this.fmtTs(r.timestamp))
+        const predicted = this.history.map(r => r.predicted)
+        const actual    = this.history.map(r => r.actual)   // null for forecast point
+
+        // Per-point styling — forecast point is a larger blue dot; history dots are small
+        const isFC       = i => this.history[i]?.is_forecast === true
+        const ptRadius   = this.history.map((_, i) => isFC(i) ? 6 : 2)
+        const ptBg       = this.history.map(() => 'rgba(96,165,250,0.9)')
+        const ptBorder   = this.history.map(() => '#60a5fa')
+        const ptHoverR   = this.history.map((_, i) => isFC(i) ? 8 : 5)
+        // Actual line: uniform orange dots
+        const actRadius  = this.history.map(() => 2)
+        const actBg      = this.history.map(() => 'rgba(251,146,60,0.9)')
+        const actBorder  = this.history.map(() => '#fb923c')
+
+        // Defensive destroy: use Chart.js registry so stale references never block canvas reuse
+        const prev2 = Chart.getChart('historyChart'); if (prev2) prev2.destroy()
+        const ctx = document.getElementById('historyChart').getContext('2d')
+        this._histChart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              {
+                label:                'Predicted',
+                data:                 predicted,
+                borderColor:          '#60a5fa',
+                backgroundColor:      'rgba(96,165,250,0.08)',
+                tension:              0.35,
+                pointRadius:          ptRadius,
+                pointBackgroundColor: ptBg,
+                pointBorderColor:     ptBorder,
+                pointHoverRadius:     ptHoverR,
+                fill:                 true,
+                borderWidth:          2,
+                // Dashed segment from last history point → forecast point
+                segment: {
+                  borderDash: ctx => isFC(ctx.p1DataIndex) ? [5, 4] : undefined,
+                },
+              },
+              {
+                label:                'Actual',
+                data:                 actual,
+                borderColor:          '#fb923c',
+                backgroundColor:      'rgba(251,146,60,0.08)',
+                tension:              0.35,
+                pointRadius:          actRadius,
+                pointBackgroundColor: actBg,
+                pointBorderColor:     actBorder,
+                pointHoverRadius:     5,
+                fill:                 false,
+                borderWidth:          2,
+                borderDash:           [4, 3],
+              },
+            ],
+          },
+          options: {
+            responsive:          true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+              legend: {
+                labels: { color: '#9ca3af', font: { size: 12 }, boxWidth: 14 },
+              },
+              tooltip: {
+                callbacks: {
+                  title: items => {
+                    const i = items[0]?.dataIndex
+                    if (isFC(i)) return items[0].label + '  \u2190 Next-hour forecast'
+                    return items[0].label
+                  },
+                  label: ctx => {
+                    const v = ctx.raw
+                    if (v == null) return null
+                    return ` ${ctx.dataset.label}: ${v} · ${names[v] || ''}`
+                  },
+                },
+              },
+            },
+            scales: {
+              x: {
+                ticks: {
+                  color: '#6b7280',
+                  maxTicksLimit: 10,
+                  maxRotation:   30,
+                  font: { size: 10 },
+                },
+                grid: { color: '#1a2035' },
+              },
+              y: {
+                min:  0.5,
+                max:  5.5,
+                grid: { color: '#1a2035' },
+                ticks: {
+                  color:    '#9ca3af',
+                  stepSize: 1,
+                  callback: v => names[v] ? `${v} · ${names[v]}` : '',
+                  font: { size: 11 },
+                },
+              },
+            },
+          },
+        })
+      },
+
+      // ── Drift helpers ────────────────────────────────────────────────────────
+      pctChange(stats) {
+        if (!stats.ref_mean) return 0
+        return Math.round((stats.recent_mean - stats.ref_mean) / Math.abs(stats.ref_mean) * 1000) / 10
+      },
+
+      driftClass(score) {
+        const a = Math.abs(score)
+        if (a < 0.5) return 'text-green-400'
+        if (a < 1.0) return 'text-yellow-400'
+        if (a < 2.0) return 'text-orange-400'
+        return 'text-red-400'
+      },
+
+      _driftColor(score) {
+        const a = Math.abs(score)
+        if (a < 0.5) return '#22c55e'
+        if (a < 1.0) return '#eab308'
+        if (a < 2.0) return '#f97316'
+        return '#ef4444'
+      },
+
+      async fetchDrift() {
+        // No city required — drift is always global (one model = one global drift)
+        if (this.driftWindowLoaded === this.driftWindow && this.drift) return
+        this.driftLoading = true
+        this.drift = null
+        this.error = ''
+        try {
+          const res = await fetch(`/drift?window=${this.driftWindow}`)
+          if (!res.ok) { let d = 'Drift request failed'; try { d = (await res.json()).detail || d } catch {}; throw new Error(d) }
+          this.drift             = await res.json()
+          this.driftWindowLoaded = this.driftWindow
+          // IMPORTANT: set driftLoading=false BEFORE rendering so x-show sections are visible
+          this.driftLoading = false
+          await new Promise(r => setTimeout(r, 250))  // wait past Alpine's 150ms x-transition
+          this._renderDriftFeatChart()
+          this._renderDriftPredChart()
+        } catch(e) {
+          this.error        = e.message
+          this.driftLoading = false
+        }
+      },
+
+      _renderDriftFeatChart() {
+        if (!this.drift?.features) return
+        const entries = Object.entries(this.drift.features)
+        const labels  = entries.map(([k]) => k)
+        const scores  = entries.map(([, v]) => v.drift_score)
+        const colors  = scores.map(s => this._driftColor(s))
+
+        // Defensive destroy: use Chart.js registry so stale references never block canvas reuse
+        const prev3 = Chart.getChart('driftFeatChart'); if (prev3) prev3.destroy()
+        const ctx = document.getElementById('driftFeatChart').getContext('2d')
+        this._driftFeatChart = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [{
+              label: 'Drift Score (σ)',
+              data:            scores,
+              backgroundColor: colors.map(c => c + 'bb'),
+              borderColor:     colors,
+              borderWidth:     1,
+              borderRadius:    4,
+            }],
+          },
+          options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  label: ctx => {
+                    const s   = ctx.raw
+                    const abs = Math.abs(s)
+                    const sev = abs < 0.5 ? 'Negligible' : abs < 1.0 ? 'Moderate' : abs < 2.0 ? 'Significant' : 'High'
+                    const key = ctx.label
+                    const f   = this.drift.features[key]
+                    return [`  ${s.toFixed(3)}σ  — ${sev}`, `  Ref: ${f.ref_mean}  →  Recent: ${f.recent_mean}`]
+                  },
+                },
+              },
+            },
+            scales: {
+              x: {
+                grid:  { color: '#1f2937' },
+                ticks: { color: '#9ca3af', font: { size: 11 } },
+                title: { display: true, text: 'Drift Score (σ)', color: '#6b7280', font: { size: 11 } },
+              },
+              y: {
+                grid:  { display: false },
+                ticks: { color: '#d1d5db', font: { size: 12 } },
+              },
+            },
+          },
+        })
+        this._driftFeatChart.resize()
+      },
+
+      _renderDriftPredChart() {
+        if (!this.drift?.prediction_distribution) return
+        const aqiNames  = { '1':'Good','2':'Fair','3':'Moderate','4':'Poor','5':'Very Poor' }
+        const aqiColors = ['#50f0e6','#50ccaa','#f0e641','#ff5050','#960032']
+        const labels    = ['1','2','3','4','5'].map(k => `${k} · ${aqiNames[k]}`)
+        const refPcts   = ['1','2','3','4','5'].map(k => this.drift.prediction_distribution[k]?.ref_pct    || 0)
+        const recPcts   = ['1','2','3','4','5'].map(k => this.drift.prediction_distribution[k]?.recent_pct || 0)
+
+        const prev5 = Chart.getChart('driftPredChart'); if (prev5) prev5.destroy()
+        const ctx = document.getElementById('driftPredChart').getContext('2d')
+        this._driftPredChart = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              {
+                label:           'Reference',
+                data:            refPcts,
+                backgroundColor: aqiColors.map(c => c + '44'),
+                borderColor:     aqiColors,
+                borderWidth:     2,
+                borderRadius:    4,
+              },
+              {
+                label:           'Recent',
+                data:            recPcts,
+                backgroundColor: aqiColors.map(c => c + 'bb'),
+                borderColor:     aqiColors,
+                borderWidth:     2,
+                borderRadius:    4,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { labels: { color: '#9ca3af', font: { size: 12 }, boxWidth: 14 } },
+              tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.raw}%` } },
+            },
+            scales: {
+              y: {
+                grid:  { color: '#1f2937' },
+                ticks: { color: '#9ca3af', callback: v => v + '%' },
+                title: { display: true, text: 'Share of Predictions (%)', color: '#6b7280', font: { size: 11 } },
+              },
+              x: {
+                grid:  { display: false },
+                ticks: { color: '#9ca3af', font: { size: 11 } },
+              },
+            },
+          },
+        })
+        this._driftPredChart.resize()
+      },
+
+      // ── Dashboard / System methods ─────────────────────────────────────────
+
+      async fetchMeta() {
+        this.metaLoading = true
+        try {
+          const res  = await fetch('/health')
+          this.meta  = await res.json()
+        } catch(e) {
+          this.error = e.message
+        } finally {
+          this.metaLoading = false
+        }
+      },
+
+      async fetchLiveMetrics() {
+        if (this.metricsLoading) return  // already fetching, don't stack
+        if (this.liveMetrics && this._cachedMetricsHours === this.metricsHours) return  // cached
+        this.metricsLoading = true
+        this.liveMetrics    = null
+        try {
+          const res = await fetch(`/model-metrics?hours=${this.metricsHours}`)
+          if (!res.ok) { this.metricsLoading = false; return }
+          this.liveMetrics         = await res.json()
+          this._cachedMetricsHours = this.metricsHours
+        } catch(e) {
+          // silent — metrics only available once Athena has ground-truth
+        } finally {
+          this.metricsLoading = false
+        }
+      },
+
+      async fetchAccuracyTrend() {
+        if (this.accTrend) return
+        this.accTrendLoading = true
+        this.accTrend = null
+        const ctrl  = new AbortController()
+        const timer = setTimeout(() => ctrl.abort(), 30000)
+        try {
+          const res = await fetch(`/accuracy-trend?weeks=8`, { signal: ctrl.signal })
+          clearTimeout(timer)
+          if (!res.ok) { this.accTrendLoading = false; return }
+          this.accTrend     = await res.json()
+          this.accTrendLoading = false
+          await new Promise(r => setTimeout(r, 250))
+          this._renderAccTrendChart()
+        } catch(e) {
+          clearTimeout(timer)
+          this.accTrendLoading = false
+        }
+      },
+
+      _renderAccTrendChart() {
+        if (!this.accTrend?.trend?.length) return
+        const labels   = this.accTrend.trend.map(r => r.day)
+        const values   = this.accTrend.trend.map(r => +(r.accuracy * 100).toFixed(1))
+        const last7    = +(this.accTrend.last_7d_accuracy  * 100).toFixed(1)
+        const prior7   = this.accTrend.prior_7d_accuracy !== null
+                           ? +(this.accTrend.prior_7d_accuracy * 100).toFixed(1)
+                           : null
+        const lineColor = this.accTrend.concept_drift_flag ? '#ef4444' : '#34d399'
+
+        const prev = Chart.getChart('accTrendChart'); if (prev) prev.destroy()
+        const ctx  = document.getElementById('accTrendChart')
+        if (!ctx) return
+
+        const datasets = [
+          {
+            label:           'Daily Accuracy',
+            data:            values,
+            borderColor:     lineColor,
+            backgroundColor: lineColor + '22',
+            fill:            true,
+            tension:         0.3,
+            pointRadius:     3,
+            borderWidth:     2,
+          },
+          {
+            label:           'Last 7d avg',
+            data:            Array(labels.length).fill(last7),
+            borderColor:     '#60a5fa',
+            borderDash:      [5, 4],
+            borderWidth:     1.5,
+            pointRadius:     0,
+            fill:            false,
+          },
+        ]
+        if (prior7 !== null) {
+          datasets.push({
+            label:       'Prior 7d avg',
+            data:        Array(labels.length).fill(prior7),
+            borderColor: '#9ca3af',
+            borderDash:  [3, 3],
+            borderWidth: 1.5,
+            pointRadius: 0,
+            fill:        false,
+          })
+        }
+
+        this._accTrendChart = new Chart(ctx.getContext('2d'), {
+          type: 'line',
+          data: { labels, datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { labels: { color: '#9ca3af', font: { size: 11 }, boxWidth: 12 } },
+              tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${c.parsed.y.toFixed(1)}%` } },
+            },
+            scales: {
+              x: { grid: { color: '#1a2035' }, ticks: { color: '#6b7280', font: { size: 10 }, maxTicksLimit: 10 } },
+              y: {
+                min: 0, max: 100,
+                grid:  { color: '#1a2035' },
+                ticks: { color: '#9ca3af', callback: v => v + '%' },
+                title: { display: true, text: 'Accuracy (%)', color: '#6b7280', font: { size: 11 } },
+              },
+            },
+          },
+        })
+        this._accTrendChart.resize()
+      },
+
+      async fetchFeatImp() {
+        if (this.featImp) {
+          await this.$nextTick()
+          this._renderFeatImpChart()
+          if (this.featImpHistory) this._renderFeatImpTrendChart()
+          return
+        }
+        this.featImpLoading = true
+        try {
+          const [res, histRes] = await Promise.all([
+            fetch('/feature-importance'),
+            fetch('/feature-importance/history'),
+          ])
+          if (!res.ok) { this.featImpLoading = false; return }
+          this.featImp = await res.json()
+          if (histRes.ok) {
+            try {
+              const ct = histRes.headers.get('content-type') || ''
+              if (ct.includes('application/json')) {
+                const h = await histRes.json()
+                this.featImpHistory = h.snapshots || []
+              }
+            } catch(e) { /* ignore non-JSON response during deploys */ }
+          }
+          await new Promise(r => setTimeout(r, 200))
+          this._renderFeatImpChart()
+          if (this.featImpHistory && this.featImpHistory.length > 1) this._renderFeatImpTrendChart()
+        } catch(e) {
+          // silent
+        } finally {
+          this.featImpLoading = false
+        }
+      },
+
+      _renderFeatImpTrendChart() {
+        const history = this.featImpHistory
+        if (!history || history.length < 2) return
+        const prev6 = Chart.getChart('featImpTrendChart'); if (prev6) prev6.destroy()
+        const ctx = document.getElementById('featImpTrendChart')
+        if (!ctx) return
+        // Labels = date from computed_at
+        const labels = history.map(s => s.computed_at ? s.computed_at.split(' ')[0] : '?')
+        // Show top 5 features by gain in latest snapshot, others grouped
+        const latest = history[history.length - 1]
+        const topFeats = Object.entries(latest.gain || {})
+          .sort((a, b) => b[1] - a[1]).slice(0, 5).map(([f]) => f)
+        const palette = ['#eab308','#60a5fa','#34d399','#f87171','#a78bfa']
+        const datasets = topFeats.map((feat, i) => ({
+          label:       feat,
+          data:        history.map(s => +((s.gain?.[feat] || 0) * 100).toFixed(2)),
+          borderColor: palette[i],
+          backgroundColor: palette[i] + '22',
+          borderWidth: 2,
+          pointRadius: 3,
+          tension:     0.3,
+          fill:        false,
+        }))
+        this._featImpTrendChart = new Chart(ctx.getContext('2d'), {
+          type: 'line',
+          data: { labels, datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { labels: { color: '#9ca3af', font: { size: 11 }, boxWidth: 12 } },
+              tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${c.parsed.y.toFixed(2)}%` } },
+            },
+            scales: {
+              x: { grid: { color: '#1f2937' }, ticks: { color: '#6b7280', font: { size: 10 } } },
+              y: {
+                grid:  { color: '#1f2937' },
+                ticks: { color: '#6b7280', font: { size: 11 }, callback: v => v + '%' },
+                title: { display: true, text: 'Gain (%)', color: '#6b7280', font: { size: 11 } },
+              },
+            },
+          },
+        })
+      },
+
+      _renderFeatImpChart() {
+        if (!this.featImp) return
+        const fi    = this.featImp
+        const type  = this.featImpType
+        // Sort features by current type descending
+        const feats = (fi.features || []).slice().sort((a, b) => (fi[type][b] || 0) - (fi[type][a] || 0))
+        const vals  = feats.map(f => +((fi[type][f] || 0) * 100).toFixed(2))
+        const colors = vals.map(v => v >= 15 ? '#eab308' : v >= 8 ? '#f59e0b' : '#4b5563')
+
+        const prev = Chart.getChart('featImpChart'); if (prev) prev.destroy()
+        const ctx  = document.getElementById('featImpChart')
+        if (!ctx) return
+        this._featImpChart = new Chart(ctx.getContext('2d'), {
+          type: 'bar',
+          data: {
+            labels:   feats,
+            datasets: [{
+              label:            type.charAt(0).toUpperCase() + type.slice(1) + ' (%)',
+              data:             vals,
+              backgroundColor:  colors,
+              borderRadius:     4,
+              borderSkipped:    false,
+            }],
+          },
+          options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  label: ctx => ` ${ctx.parsed.x.toFixed(2)}%`,
+                },
+              },
+            },
+            scales: {
+              x: {
+                grid:  { color: '#1f2937' },
+                ticks: { color: '#6b7280', font: { size: 11 }, callback: v => v + '%' },
+                title: { display: true, text: 'Normalised importance (%)', color: '#6b7280', font: { size: 11 } },
+              },
+              y: {
+                grid:  { color: '#1f2937' },
+                ticks: { color: '#d1d5db', font: { family: 'monospace', size: 11 } },
+              },
+            },
+          },
+        })
+      },
+
+      _startAutoRefresh() {
+        // Countdown ticks every second
+        this._cdTimer = setInterval(() => {
+          this.nextRefreshSec = Math.max(0, this.nextRefreshSec - 1)
+        }, 1000)
+        // Full data refresh every 60 minutes
+        this._refreshTimer = setInterval(async () => {
+          if (this.selectedCity) await this.fetchAll()
+          await this.fetchDrift()
+          await this.fetchMeta()
+          await this.fetchLiveMetrics()
+          this.nextRefreshSec = 3600
+        }, 60 * 60 * 1000)
+      },
+
+      async triggerRefresh() {
+        if (this.selectedCity) await this.fetchAll()
+        await this.fetchMeta()
+        await this.fetchLiveMetrics()
+        this.nextRefreshSec = 3600
+      },
+
+      fmtCountdown(secs) {
+        const m = String(Math.floor(secs / 60)).padStart(2, '0')
+        const s = String(secs % 60).padStart(2, '0')
+        return `${m}:${s}`
+      },
+
+
+
+      dataAgeHours() {
+        if (!this.prediction?.as_of) return null
+        const raw = this.prediction.as_of
+        const ts  = raw.endsWith('Z') || raw.includes('+') ? raw : raw + 'Z'
+        return Math.round((Date.now() - new Date(ts).getTime()) / 3_600_000 * 10) / 10
+      },
+
+      dataAge() {
+        const h = this.dataAgeHours()
+        if (h === null) return '—'
+        return h < 1 ? `${Math.round(h * 60)} min ago` : `${h} h ago`
+      },
+
+    }
+  }
+  </script>
+</body>
+</html>
