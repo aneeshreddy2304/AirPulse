@@ -47,7 +47,7 @@ jobs:
               "sudo -u ubuntu git -C /home/ubuntu/AirPulse fetch origin main",
               "sudo -u ubuntu git -C /home/ubuntu/AirPulse reset --hard origin/main",
               "sudo -u ubuntu git -C /home/ubuntu/AirPulse clean -fd",
-              "sudo -u ubuntu bash -lc 'cd /home/ubuntu/AirPulse && docker compose build'",
+              "sudo -u ubuntu docker compose -f /home/ubuntu/AirPulse/docker-compose.yml --project-directory /home/ubuntu/AirPulse build",
               "systemctl restart aqi-api",
               "sleep 20",
               "curl -sf http://127.0.0.1:8000/health"
