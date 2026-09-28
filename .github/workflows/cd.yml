@@ -44,12 +44,11 @@ jobs:
             --document-name "AWS-RunShellScript" \
             --parameters 'commands=[
               "set -e",
-              "cd /home/ubuntu/AirPulse",
-              "git fetch origin main",
-              "git reset --hard origin/main",
-              "git clean -fd",
-              "docker compose build",
-              "sudo systemctl restart aqi-api",
+              "sudo -u ubuntu git -C /home/ubuntu/AirPulse fetch origin main",
+              "sudo -u ubuntu git -C /home/ubuntu/AirPulse reset --hard origin/main",
+              "sudo -u ubuntu git -C /home/ubuntu/AirPulse clean -fd",
+              "sudo -u ubuntu bash -lc 'cd /home/ubuntu/AirPulse && docker compose build'",
+              "systemctl restart aqi-api",
               "sleep 20",
               "curl -sf http://127.0.0.1:8000/health"
             ]' \
