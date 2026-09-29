@@ -33,6 +33,22 @@ sudo systemctl start docker
 sudo usermod -aG docker "$USER"
 echo "   Docker $(docker --version) installed"
 
+# ── AWS CLI v2 ────────────────────────────────────────────────────────────────
+echo "── Installing AWS CLI v2 ─────────────────────────────────"
+sudo apt-get install -y -qq unzip
+ARCH="$(uname -m)"
+if [ "$ARCH" = "aarch64" ]; then
+    AWSCLI_ARCH="aarch64"
+else
+    AWSCLI_ARCH="x86_64"
+fi
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWSCLI_ARCH}.zip" -o /tmp/awscliv2.zip
+rm -rf /tmp/aws
+unzip -q /tmp/awscliv2.zip -d /tmp
+sudo /tmp/aws/install --update
+rm -rf /tmp/aws /tmp/awscliv2.zip
+echo "   $(aws --version)"
+
 # ── 3. Clone repo ─────────────────────────────────────────────────────────────
 echo "── Cloning repository ───────────────────────────────────"
 if [ -d "$APP_DIR/.git" ]; then

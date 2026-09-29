@@ -161,7 +161,7 @@ cd "$BUILD_B" && zip -r "$ZIP_B" . > /dev/null && cd - > /dev/null
 echo "   Package: $ZIP_B ($(du -sh $ZIP_B | cut -f1))"
 
 PREDICT_API_URL="${PREDICT_API_URL:-}"
-ENV_B="Variables={ATHENA_DB=aqi_db,ATHENA_TABLE=aqi_unified,ATHENA_RESULTS=${ATHENA_RESULTS},S3_BUCKET=${S3_BUCKET}}"
+ENV_B="Variables={ATHENA_DB=aqi_db,ATHENA_TABLE=aqi_unified,ATHENA_RESULTS=${ATHENA_RESULTS},S3_BUCKET=${S3_BUCKET},PREDICT_API_URL=${PREDICT_API_URL}}"
 
 if aws lambda get-function --function-name "$LAMBDA_B" --region "$REGION" &>/dev/null; then
     echo "── Updating Lambda B..."
@@ -205,13 +205,20 @@ ZIP_C="/tmp/aqi-flush.zip"
 echo "── Building Lambda C package..."
 rm -rf "$BUILD_C" && mkdir -p "$BUILD_C"
 cp lakehouse/prediction_flush_handler.py "$BUILD_C/handler.py"
-# install runtime deps (redis + pyarrow) into package directory
-pip install --quiet     --platform manylinux2014_x86_64     --implementation cp     --python-version 3.12     --only-binary=:all:     --target "$BUILD_C" redis pyarrow
+# Redis is packaged with the function. PyArrow is supplied by the
+# AWS SDK for pandas managed Lambda layer.
+pip install --quiet --target "$BUILD_C" redis
+
+PANDAS_LAYER_ARN="${PANDAS_LAYER_ARN:-arn:aws:lambda:${REGION}:336392948345:layer:AWSSDKPandas-Python312:18}"
 cd "$BUILD_C" && zip -r "$ZIP_C" . > /dev/null && cd - > /dev/null
 echo "   Package: $ZIP_C ($(du -sh $ZIP_C | cut -f1))"
 
-ENV_C="Variables={S3_BUCKET=${S3_BUCKET},ATHENA_DB=aqi_db,ATHENA_RESULTS=${ATHENA_RESULTS}}"
-# REDIS_URL must be set separately in the Lambda console (contains credentials)
+REDIS_URL="${REDIS_URL:-}"
+if [[ -z "$REDIS_URL" ]]; then
+    echo "ERROR: REDIS_URL must be set in .env before deploying Lambda C"
+    exit 1
+fi
+ENV_C="Variables={S3_BUCKET=${S3_BUCKET},ATHENA_DB=aqi_db,ATHENA_RESULTS=${ATHENA_RESULTS},REDIS_URL=${REDIS_URL}}"
 
 if aws lambda get-function --function-name "$LAMBDA_C" --region "$REGION" &>/dev/null; then
     echo "── Updating Lambda C..."
@@ -219,6 +226,7 @@ if aws lambda get-function --function-name "$LAMBDA_C" --region "$REGION" &>/dev
         --zip-file "fileb://$ZIP_C" --region "$REGION" > /dev/null
     aws lambda wait function-updated --function-name "$LAMBDA_C" --region "$REGION"
     aws lambda update-function-configuration --function-name "$LAMBDA_C" \
+        --layers "$PANDAS_LAYER_ARN" \
         --environment "$ENV_C" --region "$REGION" > /dev/null
 else
     echo "── Creating Lambda C: $LAMBDA_C..."
@@ -231,6 +239,7 @@ else
         --zip-file "fileb://$ZIP_C" \
         --timeout 300 \
         --memory-size 512 \
+        --layers "$PANDAS_LAYER_ARN" \
         --environment "$ENV_C" \
         --region "$REGION" > /dev/null
     aws lambda wait function-active --function-name "$LAMBDA_C" --region "$REGION"
@@ -257,7 +266,6 @@ else
     echo "   EventBridge rule created: cron(5 * * * ? *)"
 fi
 echo "  Lambda C ready"
-echo "  Remember: set REDIS_URL env var on Lambda C in the AWS console"
 
 echo ""
 echo "Lakehouse deployment complete!"
