@@ -13,11 +13,16 @@ log = logging.getLogger(__name__)
 
 
 def _otlp_auth_headers() -> dict[str, str] | None:
-    """Return Basic auth headers for the OTLP gateway, or None if not configured."""
+    """Return auth headers for the Grafana Cloud OTLP gateway."""
+    auth_header = os.environ.get("GRAFANA_OTLP_HEADER", "").strip()
+    if auth_header:
+        return {"Authorization": auth_header}
+
     instance_id = os.environ.get("GRAFANA_OTLP_INSTANCE_ID", "").strip()
-    api_key     = os.environ.get("GRAFANA_API_KEY", "").strip()
+    api_key = os.environ.get("GRAFANA_API_KEY", "").strip()
     if not all([instance_id, api_key]):
         return None
+
     token = b64encode(f"{instance_id}:{api_key}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
 
