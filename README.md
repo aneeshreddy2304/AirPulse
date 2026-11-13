@@ -21,9 +21,60 @@ An air-quality forecast is useful only when data can be ingested consistently an
 
 ## System architecture
 
-![AirPulse architecture — system components and principal workflows](docs/architecture-overview.svg)
+```mermaid
+flowchart TB
+    subgraph Sources["Environmental sources"]
+        WeatherAPI["Weather API"]
+        AirAPI["Air-quality API"]
+    end
 
-The diagram organizes the major flows into aligned lanes to make their responsibilities and handoffs clear. It is a high-level view; individual modules may also communicate across lanes.
+    subgraph Ingestion["Hourly ingestion and lakehouse"]
+        IngestLambda["Ingestion Lambda<br/>normalize and write Parquet"]
+        Raw[("S3 raw Parquet / Bronze")]
+        MergeLambda["Merge Lambda"]
+        Athena["Athena query engine"]
+        Glue["Glue Data Catalog"]
+        Iceberg[("Iceberg unified table / Silver")]
+        WeatherAPI --> IngestLambda
+        AirAPI --> IngestLambda
+        IngestLambda --> Raw --> MergeLambda --> Athena
+        Glue --- Athena
+        Athena --> Iceberg
+    end
+
+    subgraph Training["Model training — ml/train.py"]
+        FeatureBuild["Lag, transition, and environmental features"]
+        XGBoost["XGBoost classifier"]
+        MLflow["MLflow tracking"]
+        Registry[("Portable model, feature, and median artifacts")]
+        Iceberg --> FeatureBuild --> XGBoost
+        XGBoost --> MLflow
+        XGBoost --> Registry
+    end
+
+    subgraph Serving["Prediction and analysis service"]
+        Dashboard["HTML dashboard and API clients"]
+        FastAPI["FastAPI<br/>prediction • history • drift • model views"]
+        Inference["app/inference.py<br/>artifact-backed feature vector and prediction"]
+        Redis[("Redis cache and prediction buffer")]
+        Dashboard --> FastAPI
+        FastAPI --> Inference
+        Registry --> Inference
+        FastAPI <--> Redis
+        FastAPI -->|"cache miss / warm cycle"| Athena
+    end
+
+    subgraph PredictionHistory["Prediction persistence"]
+        Flush["Prediction-flush Lambda"]
+        PredFiles[("S3 prediction Parquet")]
+        PredTable[("Iceberg prediction history / Gold")]
+        Redis --> Flush --> PredFiles
+        Flush --> Athena --> PredTable
+    end
+
+    FastAPI -. "OTLP traces • metrics • logs" .-> Observability["Configured observability backends"]
+```
+
 
 ### How it works
 
