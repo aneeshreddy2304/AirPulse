@@ -1,3 +1,120 @@
 # AirPulse
 
-AirPulse is an end-to-end air quality forecasting and MLOps project designed to collect, process, and analyze environmental data for AQI prediction. The project explores cloud-based data pipelines, machine learning, model monitoring, caching, and automated workflows using technologies such as Python, AWS, XGBoost, and Redis. AirPulse is currently under active development, with additional improvements to the prediction pipeline, monitoring, and deployment in progress.
+**Air-quality data engineering, forecasting, and model serving**
+
+## Overview
+
+AirPulse connects environmental-data collection, cloud storage, feature engineering, machine learning, and an HTTP prediction service. The repository separates its data pipeline, lakehouse, model training, API, and deployment concerns instead of treating forecasting as a notebook-only exercise.
+
+### Why this project matters
+
+An air-quality forecast is useful only when data can be ingested consistently and predictions can be served through a dependable interface. AirPulse models the full path from environmental observations to an operational inference endpoint.
+
+## Key capabilities
+
+- Collects and prepares environmental and air-quality observations for downstream analysis.
+- Uses an AWS-based storage and query path involving S3, Apache Iceberg, Glue, and Athena.
+- Builds historical and temporal features for XGBoost-based forecasting.
+- Tracks model workflows and artifacts with MLflow.
+- Exposes prediction functionality through FastAPI with Redis-backed caching.
+- Organizes pipeline, API, model, deployment, and validation modules into separate directories.
+
+## System architecture
+
+```mermaid
+flowchart TB
+    subgraph Sources["Environmental sources"]
+        WeatherAPI["Weather API"]
+        AirAPI["Air-quality API"]
+    end
+
+    subgraph Ingestion["Hourly ingestion and lakehouse"]
+        IngestLambda["Ingestion Lambda<br/>normalize and write Parquet"]
+        Raw[("S3 raw Parquet / Bronze")]
+        MergeLambda["Merge Lambda"]
+        Athena["Athena query engine"]
+        Glue["Glue Data Catalog"]
+        Iceberg[("Iceberg unified table / Silver")]
+        WeatherAPI --> IngestLambda
+        AirAPI --> IngestLambda
+        IngestLambda --> Raw --> MergeLambda --> Athena
+        Glue --- Athena
+        Athena --> Iceberg
+    end
+
+    subgraph Training["Model training — ml/train.py"]
+        FeatureBuild["Lag, transition, and environmental features"]
+        XGBoost["XGBoost classifier"]
+        MLflow["MLflow tracking"]
+        Registry[("Portable model, feature, and median artifacts")]
+        Iceberg --> FeatureBuild --> XGBoost
+        XGBoost --> MLflow
+        XGBoost --> Registry
+    end
+
+    subgraph Serving["Prediction and analysis service"]
+        Dashboard["HTML dashboard and API clients"]
+        FastAPI["FastAPI<br/>prediction • history • drift • model views"]
+        Inference["app/inference.py<br/>artifact-backed feature vector and prediction"]
+        Redis[("Redis cache and prediction buffer")]
+        Dashboard --> FastAPI
+        FastAPI --> Inference
+        Registry --> Inference
+        FastAPI <--> Redis
+        FastAPI -->|"cache miss / warm cycle"| Athena
+    end
+
+    subgraph PredictionHistory["Prediction persistence"]
+        Flush["Prediction-flush Lambda"]
+        PredFiles[("S3 prediction Parquet")]
+        PredTable[("Iceberg prediction history / Gold")]
+        Redis --> Flush --> PredFiles
+        Flush --> Athena --> PredTable
+    end
+
+    FastAPI -. "OTLP traces • metrics • logs" .-> Observability["Configured observability backends"]
+```
+
+
+### How it works
+
+Environmental observations enter the data pipeline and are prepared for the lakehouse and feature-engineering workflows. The machine-learning layer trains and manages forecasting artifacts, while the application layer loads the appropriate artifacts to answer prediction requests.
+
+The API and caching components form the serving path; cloud credentials and external services are provided through local configuration rather than embedded in the README.
+
+## Technology stack
+
+| Technology | Purpose |
+| --- | --- |
+| **Python / pandas** | Data ingestion and transformation |
+| **AWS S3 / Glue / Athena** | Cloud storage, catalog, and query |
+| **Apache Iceberg** | Lakehouse table format |
+| **XGBoost / scikit-learn** | Machine-learning workflows |
+| **MLflow** | Model experiment and artifact tracking |
+| **FastAPI / Redis** | Inference API and cache |
+| **Docker / uv** | Reproducible environments and services |
+
+## Repository structure
+
+```text
+data-pipeline/  Environmental data ingestion and preparation
+lakehouse/      Lakehouse storage and query modules
+ml/             Forecasting and model workflows
+app/            Prediction API and application components
+deploy/         Deployment configuration
+tests/          Validation tests
+pyproject.toml  Python dependencies and tooling
+```
+
+## Getting started
+
+```bash
+cp .env.example .env
+uv sync --frozen --group dev
+# Configure the required external services and model artifacts.
+# Refer to app/ and deploy/ for the service entry points.
+```
+
+## Notes and prerequisites
+
+The complete workflow depends on configured data sources, authorized AWS access, and compatible saved model artifacts. The project includes separate service and infrastructure components; it is not a standalone script requiring no configuration.
