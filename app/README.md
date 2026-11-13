@@ -1,6 +1,6 @@
 # app/ — FastAPI Prediction Service
 
-The production web service that serves AQI predictions, history charts, drift analysis, and live model metrics. Deployed behind nginx on an EC2 t4g.small (ARM64 Graviton2). All prediction endpoints are served from Redis and respond in under 1 millisecond. Athena is only queried during the /warm-cache batch run, which is triggered by Lambda B after every hourly merge.
+FastAPI serving code for AQI predictions, history, drift calculations and model metrics. Deployment files target nginx/EC2. Routes generally check Redis first and may query Athena on a cache miss; no independently measured response-time guarantee or current public availability is established.
 
 **Current model: Approach A — XGBoost 19-feature model with 5× transition sample boost, trained on a rolling 365-day window.**
 
@@ -196,3 +196,7 @@ All three observability signals are pushed directly from the FastAPI container t
 | GRAFANA_LOKI_USER | Loki instance user ID |
 | OTEL_SERVICE_NAME | Service name tag (default: aqi-api) |
 | OTEL_SERVICE_VERSION | Service version tag (default: 1.0) |
+
+## Operational boundary
+
+The checked-in nginx configuration forwards control endpoints without authentication. Restrict `/warm-cache` and `/reload-model` before public exposure. See the [root README](../README.md) for tested scope and current durability limitations.

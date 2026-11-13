@@ -43,7 +43,7 @@ Runs every hour via EventBridge at :00. Fetches live AQI and pollutant readings 
 
 **Lambda B (aqi-iceberg-merge)**
 
-Triggered by Lambda A. Runs a MERGE INTO query in Athena against aqi_db.aqi_unified scoped to the exact new file. This means only the 99 new rows are ever scanned, not the full table. After the merge succeeds, it sends a POST /warm-cache HTTP request to the FastAPI service on EC2. FastAPI then pulls the latest data from Athena, runs the model on all 99 cities, and populates Redis.
+Triggered by Lambda A. Runs a MERGE INTO query in Athena against aqi_db.aqi_unified scoped to the exact new file. The source is filtered to the new file. Actual Athena scan volume also depends on target-table planning and partition pruning; no fixed scan-volume claim is established. After the merge succeeds, it sends a POST /warm-cache HTTP request to the FastAPI service on EC2. FastAPI then pulls the latest data from Athena, runs the model on all 99 cities, and populates Redis.
 
 Required environment variables for Lambda B:
 - ATHENA_DB: aqi_db
@@ -156,3 +156,7 @@ LIMIT 20;
 ```
 
 Before running queries in the Athena console, set the query result location to s3://airpulse-aneesh-2026/athena-results/ and set the database to aqi_db.
+
+## Reliability boundary
+
+The current prediction flush uses separate Redis read/delete operations before durable S3/Athena completion. This is not an atomic acknowledged queue: concurrent appends or failures can lose buffer records. The diagram and layer descriptions document the implemented paths, not guaranteed exactly-once delivery.

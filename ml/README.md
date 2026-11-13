@@ -1,6 +1,6 @@
 # ml/ — Model Training and Registry
 
-XGBoost classifier that predicts the next-hour AQI class (1 through 5) for any city in the dataset, trained on 12 months of hourly air quality data stored in Athena.
+XGBoost classifier that predicts the next-hour AQI class (1 through 5) for any city in the dataset, configured to query a rolling window of air quality data stored in Athena.
 
 ---
 
@@ -26,7 +26,7 @@ ml/
 | Source | AWS Athena aqi_db.aqi_unified (S3-backed Parquet via Iceberg) |
 | Time range | Rolling 365-day window; slides forward 1 day on each daily retrain (e.g. run on Apr 7 → trains on Apr 7, 2025 – Apr 7, 2026) |
 | Cities | 99 world cities, hourly readings |
-| Total rows | Approximately 876,000 after feature engineering |
+| Total rows | Depends on available history and filtering; no fixed row count is guaranteed |
 | Target | aqi_next: AQI class at T+1, values 1 through 5 |
 
 ### AQI Scale
@@ -186,3 +186,7 @@ Every day at 05:00 UTC, GitHub Actions runs daily_retrain.yml which:
 4. Uploads the new model artifacts to EC2 via SCP
 5. Calls POST /reload-model on the API to load the new artifacts into memory
 6. The reload also clears all Redis cache keys so fresh predictions are computed on the next /warm-cache call
+
+## Interpreting model metrics
+
+The CV and validation F1 figures above are historical search/configuration reference values, not fresh scores for each daily candidate. `train.py` fits the available prepared dataset and logs those reference values; the workflow smoke-checks artifact shape/probabilities. It does not implement a new temporal-holdout performance gate. Row-based lagging also requires continuous, deduplicated observations before it can be interpreted as hourly.
